@@ -20,7 +20,8 @@
  *
  * REVISION HISTORY
  * Version 1.0 - Henrik Ekblad
- * 
+ * Version 1.1 - Ghislain CHOUET
+ * Version 1.2 - Ghislain CHOUET
  * DESCRIPTION
  * Pressure sensor example using BMP085 module  
  * http://www.mysensors.org/build/pressure
@@ -32,7 +33,6 @@
 
 // Enable and select radio type attached
 #define MY_RADIO_NRF24
-//#define MY_RADIO_RFM69
 
 #define MY_RF24_PA_LEVEL RF24_PA_LOW
 
@@ -48,10 +48,20 @@
 #define TEMP_CHILD 1
 #define PREV_CHILD 2
 
-const float ALTITUDE = 350; // <-- adapt this value to your own location's altitude.
-
-// Sleep time between reads (in seconds). Do not change this value as the forecast algorithm needs a sample every minute.
-const unsigned long SLEEP_TIME = 60000; 
+// Sleep time between reads (in mseconds?). Do not change this value as the forecast algorithm needs a sample every minute.
+const unsigned long SLEEP_TIME = 60000;
+const unsigned long UpdateTime = 90000;
+float lastTempWinP;
+float lastTempWinN;
+float lastPressWinP;
+float lastPressWinN;
+unsigned long timeTemp = millis();
+unsigned long timePress = millis(); 
+unsigned long timer = millis(); 
+unsigned long timeForecast = millis();
+float pressure;
+float temperature;
+int forecast;
 
 const char *weather[] = { "stable", "sunny", "cloudy", "unstable", "thunderstorm", "unknown" };
 enum FORECAST
@@ -86,6 +96,7 @@ float pressureAvg2;
 
 float dP_dt;
 bool metric;
+
 MyMessage tempMsg(TEMP_CHILD, V_TEMP);
 MyMessage pressureMsg(BARO_CHILD, V_PRESSURE);
 MyMessage forecastMsg(PREV_CHILD, V_FORECAST);
@@ -93,17 +104,13 @@ MyMessage forecastMsg(PREV_CHILD, V_FORECAST);
 
 void setup() 
 {
-  if (!bmp.begin()) 
-  {
-    Serial.println("Could not find a valid BMP085 sensor, check wiring!");
-    while (1) {}
-  }
-  metric = getConfig().isMetric;
+ bmp.begin();
+ metric = getControllerConfig().isMetric;
 }
 
 void presentation()  {
   // Send the sketch version information to the gateway and Controller
-  sendSketchInfo("Pressure Sensor", "1.1");
+  sendSketchInfo("Barometer", "1.3");
 
   // Register sensors to gw (they will be created as child devices)
   present(BARO_CHILD, S_BARO);
@@ -113,49 +120,45 @@ void presentation()  {
 }
 
 void loop() 
-{
-  //float pressure = bmp.readSealevelPressure(ALTITUDE) / 100.0;
-  float pressure = bmp.readPressure() / 100;
-  float temperature = bmp.readTemperature();
 
-  if (!metric) 
-  {
-    // Convert to fahrenheit
-    temperature = temperature * 9.0 / 5.0 + 32.0;
+{ 
+  delay(100);
+  if (millis() - timer > SLEEP_TIME){
+  pressure = bmp.readPressure() / 100.0;
+  temperature = bmp.readTemperature();
+  forecast = sample(pressure);
+  timer = millis();
+ 
   }
-
-  int forecast = sample(pressure);
-
-  Serial.print("Temperature = ");
-  Serial.print(temperature);
-  Serial.println(metric ? " *C" : " *F");
-  Serial.print("Pressure = ");
-  Serial.print(pressure);
-  Serial.println(" hPa");
-  Serial.print("Forecast = ");
-  Serial.println(weather[forecast]);
-
-
-  if (temperature != lastTemp) 
+ 
+  if (temperature >= lastTempWinP || temperature <= lastTempWinN || millis() - timeTemp > UpdateTime) 
   {
     send(tempMsg.set(temperature, 1));
-    lastTemp = temperature;
-  }
+    lastTempWinP = temperature + 0.2;
+    lastTempWinN = temperature - 0.2;
+    timeTemp = millis();
+    // Serial.println(temperature);
+      }
 
-  if (pressure != lastPressure) 
+   if (pressure >= lastPressWinP || pressure <= lastPressWinN || millis() - timePress > UpdateTime + 1000) 
   {
     send(pressureMsg.set(pressure, 0));
-    lastPressure = pressure;
-  }
+    lastPressWinP = pressure + 1;
+    lastPressWinN = pressure - 1;
+    timePress = millis();
+    //Serial.println(pressure);
+      }
 
-  if (forecast != lastForecast)
+  if (forecast != lastForecast || millis() - timeForecast > UpdateTime + 2000 )
   {
     send(forecastMsg.set(weather[forecast]));
     lastForecast = forecast;
-  }
+    timeForecast = millis();
+    //Serial.println(forecast);
+      }
 
-  sleep(SLEEP_TIME);
 }
+
 
 float getLastPressureSamplesAverage()
 {
@@ -303,11 +306,11 @@ int sample(float pressure)
   }
 
   // uncomment when debugging
-  //Serial.print(F("Forecast at minute "));
+ // Serial.print(F("Forecast at minute "));
  // Serial.print(minuteCount);
  // Serial.print(F(" dP/dt = "));
- // Serial.print(dP_dt);
- // Serial.print(F("kPa/h --> "));
+  //Serial.print(dP_dt);
+ //Serial.print(F("kPa/h --> "));
   //Serial.println(weather[forecast]);
 
   return forecast;

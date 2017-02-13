@@ -21,8 +21,8 @@
  *
  *
  * REVISION HISTORY
- * Version 1.0 - Compilation of DHT sensor & Parking Sensor by Ghislain CHOUET 05/02/2017
- * 
+ * Version 1.0 - Compilation of DhtTemperature & Parking Sensor
+ * Version 1.1 - Replace counter by time to update every x seconds values
  * DESCRIPTION
  * Parking sensor using a neopixel led ring and distance sensor (HC-SR04).
  * Configure the digital pins used for distance sensor and neopixels below.
@@ -38,19 +38,20 @@
 #define SEND_STATUS_TO_CONTROLLER  // Put a comment on this line for standalone mode
 
 // Enable debug prints to serial monitor
-#define MY_DEBUG 
+//#define MY_DEBUG 
 
+#ifdef SEND_STATUS_TO_CONTROLLER
 // Enable and select radio type attached Disabled
 #define MY_RADIO_NRF24
 #define MY_RF24_PA_LEVEL RF24_PA_LOW
-
-// Noeud de l'objet / Object Node
-#define MY_NODE_ID 1
+#define MY_NODE_ID 11
+#define MY_REPEATER_FEATURE
+#include <MySensors.h>
+#endif
 
 #include <Adafruit_NeoPixel.h>
 #include <NewPing.h>
 #include <SPI.h>
-#include <MySensors.h>
 #include <DHT.h> 
 
 // Set this to the pin you connected the DHT's data pin to
@@ -64,11 +65,11 @@
 #define MAX_INTESITY   5 // Intesity of leds (in percentage). Remember more intesity requires more power.
 
 // The maximum rated measuring range for the HC-SR04 is about 400-500cm.
-#define MAX_DISTANCE 150 // Max distance we want to start indicating green (in cm)
+#define MAX_DISTANCE 400 // Max distance we want to start indicating green (in cm)
 #define PANIC_DISTANCE 15 // Mix distance we red warning indication should be active (in cm)
-#define PARKED_DISTANCE 100 // Distance when "parked signal" should be sent to controller (in cm)
+#define PARKED_DISTANCE 45 // Distance when "parked signal" should be sent to controller (in cm)
 
-#define PARK_OFF_TIMEOUT 30000 // Number of milliseconds until turning off light when parked.
+#define PARK_OFF_TIMEOUT 80000 // Number of milliseconds until turning off light when parked.
 
 // Note that for older NeoPixel strips you might need to change the third parameter--see the strandtest
 // example for more information on possible values.
@@ -80,35 +81,15 @@ NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE); // NewPing setup of pins and
 // Set this offset if the sensor has a permanent small offset to the real temperatures
 #define SENSOR_TEMP_OFFSET 0
 
-// Sleep time between sensor updates (in milliseconds)
-// Must be >1000ms for DHT22 and >2000ms for DHT11
-static const uint64_t UPDATE_INTERVAL = 600000;
-
-// Force sending an update of the temperature after n sensor reads, so a controller showing the
-// timestamp of the last update doesn't show something like 3 hours in the unlikely case, that
-// the value didn't change since;
-// i.e. the sensor would force sending an update every UPDATE_INTERVAL*FORCE_UPDATE_N_READS [ms]
-static const uint64_t FORCE_UPDATE_N_READS = 10000;
-
 #define CHILD_ID_HUM 0  
 #define CHILD_ID_TEMP 1
 #define CHILD_ID 2
 
-float lastTemp;
 float lastTempWinP;
 float lastTempWinN;
-char lastHum;
 char lastHumWinP;
 char lastHumWinN;
-uint64_t nNoUpdatesTemp;
-uint64_t nNoUpdatesHum;
-boolean metric = true; 
-
-MyMessage msgHum(CHILD_ID_HUM, V_HUM);
-MyMessage msgTemp(CHILD_ID_TEMP, V_TEMP);
-MyMessage msg(CHILD_ID,V_TRIPPED);
-DHT dht;
-
+boolean metric = true;
 unsigned long sendInterval = 5000;  // Send park status at maximum every 5 second.
 unsigned long lastSend;
 
@@ -124,6 +105,16 @@ unsigned long lastDebouncePeriod;
 int numLightPixels=0;
 int skipZero=0;
 
+unsigned long timeTemp = millis();
+unsigned long timeHum = millis(); 
+unsigned long timeParking = millis();  // add refresh for parking status
+const static uint32_t counter = 600000; 
+
+MyMessage msgHum(CHILD_ID_HUM, V_HUM);
+MyMessage msgTemp(CHILD_ID_TEMP, V_TEMP);
+MyMessage msg(CHILD_ID,V_TRIPPED);
+DHT dht;
+
 
 void presentation()  {
   sendSketchInfo("ParkingTemperatureAndHumiditySensor", "1.0");
@@ -137,65 +128,41 @@ void presentation()  {
 void setup() 
 {
   dht.setup(DHT_DATA_PIN); // set data pin of DHT sensor
-  if (UPDATE_INTERVAL <= dht.getMinimumSamplingPeriod()) {
-    Serial.println("Warning: UPDATE_INTERVAL is smaller than supported by the sensor!");
-  }
+  
   // Sleep for the time of the minimum sampling period to give the sensor time to power up
   // (otherwise, timeout errors might occure for the first reading)
   sleep(dht.getMinimumSamplingPeriod());
-  
-  Serial.println("Starting distance sensor");
   pixels.begin(); // This initializes the NeoPixel library.
-  Serial.println("Neopixels initialized");
-  }
+  
+    }
 
 
 void loop() 
 {
   // Get temperature from DHT library
   float temperature = dht.getTemperature();
-  if (isnan(temperature)) {
-    Serial.println("Failed reading temperature from DHT!");
-  } else if (temperature >= lastTempWinP || temperature <= lastTempWinN || nNoUpdatesTemp == FORCE_UPDATE_N_READS) {
+  if (temperature >= lastTempWinP || temperature <= lastTempWinN || millis() - timeTemp > counter) {
     // Only send temperature if it changed since the last measurement or if we didn't send an update for n times
-    lastTemp = temperature;
-    lastTempWinP = lastTemp + 0.2;
-    lastTempWinN = lastTemp - 0.2;
-       if (!metric) {
-      temperature = dht.toFahrenheit(temperature);
-    }
-    // Reset no updates counter
-    nNoUpdatesTemp = 0;
+    lastTempWinP = temperature + 0.2;
+    lastTempWinN = temperature - 0.2;
     temperature += SENSOR_TEMP_OFFSET;
     send(msgTemp.set(temperature, 1));
-
+    timeTemp = millis(); // save the new time
       } 
-      else {
-    // Increase no update counter if the temperature stayed the same
-    nNoUpdatesTemp++;
-  }
+      
 
   // Get humidity from DHT library
   char humidity = dht.getHumidity();
-  if (isnan(humidity)) {
-    Serial.println("Failed reading humidity from DHT");
-  } else if (humidity >= lastHumWinP || humidity <= lastHumWinN || nNoUpdatesHum == FORCE_UPDATE_N_READS) {
+  if (humidity >= lastHumWinP || humidity <= lastHumWinN || (millis() - timeHum) > (counter + 1000)) {
     // Only send humidity if it changed since the last measurement or if we didn't send an update for n times
-    lastHum = humidity;
-    lastHumWinP = lastHum + 2;
-    lastHumWinN = lastHum - 2;
+    lastHumWinP = humidity + 2;
+    lastHumWinN = humidity - 2;
     // Reset no updates counter
-    nNoUpdatesHum = 0;
     send(msgHum.set(humidity, 0));
-    
+    timeHum = millis(); // save the new time
       } 
-      else {
-    // Increase no update counter if the humidity stayed the same
-    nNoUpdatesHum++;
-  }
-
-  
-  unsigned long now = millis();
+     
+  unsigned long now = millis(); 
   unsigned int fullDist = (sonar.ping_median() / US_ROUNDTRIP_CM);
   
   int displayDist = min(fullDist, MAX_DISTANCE);
@@ -204,25 +171,28 @@ void loop()
     skipZero++;
   return;
   }
+
   // Check if it is time to alter the leds
   if (now-lastDebouncePeriod > distDebounce) {
     lastDebouncePeriod = now;
 
     // Update parked status
-    int parked = displayDist != 0 && displayDist<PARKED_DISTANCE;
-    if (parked != oldParkedStatus && now-lastSend > sendInterval) {
-      if (parked)
-        Serial.println("Car Parked");
-      else
-        Serial.println("Car Gone");
-#ifdef SEND_STATUS_TO_CONTROLLER
+    int parked = displayDist != 0 && displayDist<PARKED_DISTANCE; // why not bool ?
+    if (parked != oldParkedStatus && now-lastSend > sendInterval) {  // add counter to refresh if parked or not
+      
       send(msg.set(parked)); 
-#endif
+
       oldParkedStatus = parked;
       lastSend = now;
-    }
+      }
 
-    if (parked && now-lastSend > PARK_OFF_TIMEOUT) {
+    // add counter to refresh if parked or not
+    if (now - timeParking > counter) { 
+      send(msg.set(parked));
+      timeParking = now;
+      }
+
+    if ((parked || !parked ) && now-lastSend > PARK_OFF_TIMEOUT) {
       // We've been parked for a while now. Turn off all pixels
       for(int i=0;i<NUMPIXELS;i++){
         pixels.setPixelColor(i, pixels.Color(0,0,0)); 
